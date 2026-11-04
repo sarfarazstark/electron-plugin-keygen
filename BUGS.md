@@ -67,6 +67,10 @@ Consequence for a host: if you want offline use that survives a restart, call
 `validateCheckoutKey()`, not `validateKey()`. A user who flies overnight and opens the app on the other
 side revalidates or stays unlicensed.
 
+Observed against a real account rather than argued from the source: the offline restart that restores
+the license today restores nothing when the same read runs under `TZ=Pacific/Kiritimati`, because that
+is already a different local date and therefore a different filename. `npm run verify:live` covers both.
+
 ### Seats are never released — medium
 
 `validateKey` auto-activates on `NO_MACHINE` / `NO_MACHINES` / `FINGERPRINT_SCOPE_MISMATCH`
@@ -132,8 +136,8 @@ offline access tamper-proof, and encryption at rest does not stop someone who co
 application.
 
 The detached-bindings row is not a finding from the review — it is a regression this port introduced
-when it moved to the async API, and 151 passing tests did not see it because every one of them injected
-a plain-object codec. Detached methods on a plain object work fine. It surfaced the first time the real
+when it moved to the async API, and the whole suite passed without seeing it: every test injected a
+plain-object codec, and detached methods on a plain object work fine. It surfaced the first time the real
 `safeStorage` was called, and it is the reason this file now distinguishes "tested" from "run against
 Electron".
 
@@ -199,6 +203,34 @@ The first run of that check also produced the `IPC_UNREACHABLE` fix: it called `
 `registerKeygen` in the process, the invoke reached `keygen:get-license-key`, and Electron's raw "No
 handler registered" error surfaced in the renderer where `isKeygenError(err)` said it was not a keygen
 error. A host that forgets to wire the main process now gets a `KeygenError` like every other failure.
+
+## What the live account run proved — note
+
+`npm run verify:live` (credentials from the environment or a gitignored `.env.local`, nothing printed
+but hashed identifiers) drives the built `dist/` inside Electron 45 on Windows against a real Keygen
+account, with a sandboxed renderer wired through the real preload. Eleven steps, all passing:
+
+- `registerKeygen` with a real account/verify key starts, and `persistsLicenses` reports `true`
+- `validateKey()` round-trips over IPC, verifies the Ed25519 signature on the live response, and the
+  renderer sees the license object (`VALID`, `valid=true`, an expiry ~2h out)
+- the key lands in `keygen/key` as 560 bytes with no plaintext key in the file, and reads back through
+  the same channel
+- an offline restart with the network stubbed to always reject restores the license from today's cache
+- appending one byte to the cached response body makes that offline restart return `BAD_CACHE` — the
+  signature is checked against the decrypted body, so a stored response cannot be edited
+- the local-day rule above, seen from two timezones
+- `validateCheckoutKey()` writes a 10,382-byte `machine.lic` in Keygen's armor
+  (`-----BEGIN MACHINE FILE-----`), containing no plaintext key, and it restores licensing offline
+- asking for a 7-day offline window against a license with 123 minutes left is refused past the license
+  itself — the ttl is a ceiling, not a grant
+- `resetLicense()` removes the machine file and the cache and keeps the key; `resetLicenseKey()` leaves
+  nothing restorable
+
+That last item is the shape of the end-to-end claim: the package's behaviour with real server
+signatures, a real DPAPI-backed vault, and a real renderer, rather than a mocked transport. It does not
+cover macOS or Linux, packaged asar layouts, or a license long enough to watch a machine file carry
+across a day boundary — and each run activates a machine that this package cannot release (see "Seats
+are never released"), so it is a credential- and seat-consuming check, not a CI default.
 
 ## Where this port diverges from `tauri-plugin-keygen` v2
 

@@ -169,11 +169,14 @@ npm run typecheck
 npm run lint
 npm run dev          # runs the example app
 npm run verify:electron   # after build: real OS vault + live renderer, see BUGS.md
+npm run verify:live       # after build: against a real Keygen account, spends a seat — see BUGS.md
 ```
 
 `npm test` mocks the network and injects a fake codec, so it verifies policy. `verify:electron` is the
 part that needs a real session: `safeStorage` through DPAPI / Keychain / libsecret, and both preload
 entry points loaded into a live renderer — the layer that a mocked codec cannot catch.
+`verify:live` goes one step further and talks to an actual licensing server with credentials from the
+environment; it activates a machine it cannot release, so it is a deliberate, seat-consuming check.
 
 `example/` is a complete Electron app consuming the published surface (`file:..` dependency).
 `tauri/` is the upstream plugin kept as the reference for this port — it is not built or shipped.
