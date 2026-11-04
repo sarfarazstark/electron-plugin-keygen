@@ -14,8 +14,9 @@ Requires Electron >= 30 (peer) and `valibot` (installed automatically). No nativ
 
 | Entry | Runs in | Provides |
 | --- | --- | --- |
-| `electron-plugin-keygen` | main | `registerKeygen`, `KeygenBuilder`, `keygenPreloadPath`, `LicensingService`, `KeygenError` |
-| `electron-plugin-keygen/preload` | preload | self-installing `window.keygen` bridge, `installKeygenBridge` |
+| `electron-plugin-keygen` | main | `registerKeygen`, `KeygenBuilder`, `keygenPreloadPath`, `keygenSandboxedPreloadPath`, `LicensingService`, `KeygenError` |
+| `electron-plugin-keygen/preload` | preload | self-installing `window.keygen` bridge, `installKeygenBridge` (ESM, unsandboxed) |
+| `electron-plugin-keygen/preload/sandboxed` | preload | the same bridge as one self-contained CommonJS file, for `sandbox: true` |
 | `electron-plugin-keygen/renderer` | renderer | `keygen`, `createKeygenLicensingApi`, `isKeygenError`, types |
 
 ## Main process
@@ -46,19 +47,26 @@ No account id, product id, verification key, or server URL is hardcoded in the p
 
 ## Window and preload
 
+Keep the renderer sandboxed and give it a CommonJS preload:
+
 ```ts
 new BrowserWindow({
 	webPreferences: {
-		preload: keygenPreloadPath(),   // or your own preload, see below
+		preload: keygenSandboxedPreloadPath(), // one self-contained .cjs
 		contextIsolation: true,
 		nodeIntegration: false,
-		sandbox: false,                 // ESM (.mjs) preload scripts require this
+		sandbox: true,
 	},
 });
 ```
 
-A host with its own preload script calls `installKeygenBridge()` from
-`electron-plugin-keygen/preload` instead.
+A sandboxed preload runs as plain JavaScript and cannot `require` sibling files, so the plugin ships
+this entry as a single self-contained file. If your app owns the preload instead, bundle it to CJS
+(`example/electron.vite.config.ts` sets `format: "cjs"` and `externalizeDeps: false` so the bridge is
+inlined) and import `electron-plugin-keygen/preload` from it.
+
+`keygenPreloadPath()` returns the ESM `.mjs` entry, which needs `sandbox: false`. Prefer the sandboxed
+path unless something else in your app forces an unsandboxed renderer.
 
 ## Renderer
 
@@ -85,28 +93,42 @@ try {
 | `resetLicense()` | Removes `machine.lic`, the validation cache and app state — keeps the cached key |
 | `resetLicenseKey()` | Removes only the cached key |
 
+Every failure this API raises is a `KeygenError`, transport failures included: a window whose preload
+is installed but whose main process never called `registerKeygen` rejects with `IPC_UNREACHABLE`
+rather than Electron's raw "No handler registered" error, so `isKeygenError(err)` never lies.
+
 ## Storage
 
 `{userData}/keygen/`
 
 - `machine.lic` — Keygen machine file (AES-256-GCM envelope, Ed25519 signature), format unchanged
-- `validation_cache/{sha256("key:YYYY-MM-DD")}` — signed response, reused offline; entries from
-  other days are deleted at startup
+- `validation_cache/{sha256("key:YYYY-MM-DD")}` — signed response, encrypted with `safeStorage`,
+  reused offline; entries from other days are deleted at startup
 - `key` — license key encrypted with Electron `safeStorage` (DPAPI / Keychain / libsecret)
+
+Both encrypted files are secrets: the cached response body contains the license key, so it is
+encrypted as a whole and re-hashed for the `Digest` check after decryption, never redacted. A cache
+written before cache encryption existed is deleted on sight rather than read, so such an install
+revalidates once online.
 
 Startup loads in the original order: machine license first, then today's response cache. An expired
 machine file short-circuits the cache; an undecryptable one falls through to it.
 
-`safeStorage` unavailability never degrades to plaintext: writes and reads throw
-`STORAGE_UNAVAILABLE`, undecryptable data throws `STORAGE_DECRYPT_FAILED`.
+`safeStorage` unavailability never degrades to plaintext. Availability is checked *before* the
+network call: `validateKey` then succeeds without persisting anything (the license does not survive a
+restart; `service.persistsLicenses` is `false`), and `checkout` refuses with `STORAGE_UNAVAILABLE`
+because a machine file whose key cannot be stored is unreadable. Undecryptable data throws
+`STORAGE_DECRYPT_FAILED`. On Linux, a `basic_text` backend — `safeStorage` encrypting under a
+hardcoded password because no secret store exists — counts as unavailable.
 
 ## Verification
 
 - Every response, live or cached, is verified with the account's public ed25519 key over the
   `(request-target)`, `host`, `date` and `digest` lines. HTTP 200 without a matching signature is
   `BAD_RESPONSE` — a successful status is never treated as a valid license.
-- Replay and staleness: live responses older than 5 minutes are rejected, cached responses must be
-  younger than `cacheLifetime` (clamped to 60–1440 minutes).
+- Replay and staleness: live responses must be within 5 minutes of the local clock **in either
+  direction**, so a captured response stays useless once the drift window passes; cached responses
+  must be younger than `cacheLifetime` (clamped to 60–1440 minutes).
 - Offline machine files are only honoured while their own issued/expiry window and the license
   expiry allow it; a future "issued" date is treated as clock tampering.
 - The renderer never touches the network, filesystem, or verification key.
@@ -114,17 +136,27 @@ machine file short-circuits the cache; an undecryptable one falls through to it.
 
 ## Deviations from the original
 
+Deliberate behaviour changes, all of them divergences from `tauri-plugin-keygen` v2 rather than
+bug-for-bug reproduction:
+
 | Change | Why |
 | --- | --- |
-| Cached key stored via `safeStorage`, not as plaintext | Electron provides OS-backed encryption; plaintext secrets were a weakness of the original |
-| User-Agent reports the Electron engine instead of WebView2/WebKit | the original read Tauri's `webview_version` and `os` plugins |
+| Cached key **and** validation cache stored via `safeStorage`, never plaintext | the response body carries the license key; plaintext at rest leaked it |
+| `validateKey` does not persist a key the server called invalid, and does not overwrite a previously cached one | a revoked or banned key has no business staying on disk |
+| Checkout omits `ttl` instead of sending a negative remaining lifetime | a negative lifetime cannot buy offline access; clamping it upward would fabricate some |
+| Clock drift is checked symmetrically | accepting any future `Date` made replay resistance depend on the server's clock |
+| Async `safeStorage` API when available (Electron 45+), sync API as fallback | the synchronous API is deprecated at 45 and removed at 46 |
 | Rust `panic!` paths (malformed base64, bad nonce/tag length) become errors | a crash in a host process is not acceptable |
+| Sandboxed preload option, six fixed channels, sender + top-frame gating, valibot arguments | the Tauri host exposed commands to whatever its capabilities allowed |
+| User-Agent reports the Electron engine instead of WebView2/WebKit | the original read Tauri's `webview_version` and `os` plugins |
 | Fingerprints from the same sources as `machine-uid`: MachineGuid, IOPlatformUUID, `/etc/machine-id` | keeps machine identity stable across restarts |
 
-Preserved deliberately, because the server and existing machine files depend on it: future-dated
-responses are accepted (minute truncation), `ttl` can go negative for a maintained `EXPIRED`
-license when `ttlForever` is false, `resetLicense` keeps the cached key, and the license key is
-cached even when the validation response is invalid.
+Still preserved on purpose, because the offline format and existing installs depend on it: the
+`machine.lic` format, whole-minute expiry comparisons (a license with 10 seconds left reports as
+expired), an `EXPIRED` license that maintains access while the server says so, and `resetLicense()`
+keeping the cached key while `resetLicenseKey()` removes it.
+
+`BUGS.md` lists what remains advisory rather than enforced.
 
 ## Development
 

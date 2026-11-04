@@ -1,163 +1,143 @@
-# BUGS.md
+# Known issues
 
-Issues found while porting `tauri-plugin-keygen` (v2) to Electron. Three groups: flaws inherited
-from the original and kept on purpose, weaknesses the port fixes, and limitations of this port.
-Severity is about the licensing guarantee, not about code style. Nothing here was demonstrated
-against a live Keygen account — analysis is from the Rust/TypeScript source and the tests in `tests/`.
+What you need to know before shipping licensing in an Electron app with this package: behaviours that
+will surprise you, the real limits of the offline guarantee, and open defects. Analysis is from the
+implementation and the tests in `tests/`. Items marked *verified in Electron* were run against a real
+Electron 45 session on Windows, not only against mocks.
 
-## 1. Inherited from the original, reproduced deliberately
+What is *guaranteed* — signature and digest verification, sender gating on every IPC channel, no
+plaintext fallback for licensing secrets — is in README.md. This file is about what is still wrong or
+unexpected.
 
-Compatibility with existing servers, licenses and machine files outweighs fixing these in a port.
-Each one has a test that pins the behaviour.
+Severity is about the licensing guarantee, not code style. "Pinned by a test" means the behaviour is
+intentional and a change to it will fail loudly — not that it is good.
 
-### 1.1 License key cached even when the license is invalid — medium
-`service.ts` `rawValidate` mirrors `commands.rs`: cache the response, update state, then
-`writeLicenseKey(license.key)` — unconditionally, including for `valid: false` results.
+## Limits of offline licensing (not fixable here)
 
-Impact: a revoked, expired or soft-banned key stays on disk in `{userData}/keygen/key` (encrypted at
-rest by `safeStorage`, but still retrievable through `getLicenseKey()`), and `resetLicense()` does not
-remove it. A user who "loses" a license still has the key material on the machine.
-Fixing it means diverging from the plugin: keep `resetLicense()` clearing the key too, or stop
-caching invalid keys. Either change alters what an upgrading app sees on disk.
+### Expiry and freshness trust the system clock — medium
 
-### 1.2 `ttl` can be sent to the server as a negative number — low
-`machine.ts`/`service.ts` `checkout` replicate Rust's
-`ttl = min(seconds_to_expiry, clamp(ttlSeconds, 3600, 31_556_952))` with signed minutes truncation.
-For a `EXPIRED`-but-maintained license (`valid && code === "EXPIRED"`) with `ttlForever: false`,
-`seconds_to_expiry` is negative and is sent verbatim (`ttl=-100`, pinned by a test).
+`hasExpired`, `hasMachineFileExpired` and the cache lifetime compare against wall-clock time. The
+"issued in the future means tampering" rule catches a clock set *ahead*; a clock set *behind* extends
+offline access silently. There is no monotonic or server-anchored clock in this package.
 
-Impact: undefined server behaviour; Keygen currently tolerates it. If the API tightens validation,
-the same call that "worked" on the Tauri plugin starts failing here too — it fails identically on both.
+Mitigations that belong to the app, not the plugin: keep offline TTLs short, require periodic online
+revalidation, and treat offline access as a convenience.
 
-### 1.3 Future-dated responses are accepted without an upper bound — medium
-`client.ts` `verifyResponse` mirrors the chrono check:
-`Math.trunc((now - date) / 60000) > maxClockDrift` — a negative value (Date header in the future)
-always passes, so a response dated years ahead is "fresh" forever.
+### A machine file can be moved to another machine — medium
 
-Impact: replay resistance relies on the signing server never sending a skewed-future `Date`, and on
-the client clock not being set behind a captured response's date. An attacker who can capture one
-signed response and roll the local clock back far enough keeps a valid cached response far beyond the
-5-minute window. Signature verification still holds — this is a freshness gap, not a forgery gap.
-A bounded check (`abs(minutes) <= maxClockDrift`) would close it but changes which responses the
-plugin accepts, so it is not done here.
-
-### 1.4 Offline artifacts are only bound to the machine identity — medium
 `machine.lic` is AES-256-GCM under `sha256(licenseKey || fingerprint)` with an Ed25519 signature over
 `machine/{enc}`, and the fingerprint is the OS machine identifier (MachineGuid / IOPlatformUUID /
-machine-id). Nothing else ties the file to the install.
+`/etc/machine-id`). Anyone with write access as the same OS user can read the key out of
+`{userData}/keygen/key` — that is the same user `safeStorage` protects against, and on Windows DPAPI
+protects against *other users*, not other applications in your session — copy `machine.lic` to a
+machine whose fingerprint they can also compute, and keep access until the license expires.
 
-Impact: anyone with write access to the user's own machine can read the key out of
-`{userData}/keygen/key` (they are the same OS user that `safeStorage` protects against), copy
-`machine.lic` to a machine whose fingerprint they can also compute, and keep offline access until the
-license expiry. This is inherent to client-side offline licensing; listed so nobody assumes the
-machine file is tamper-proof. Not fixable inside this plugin.
+Treat machine binding as a deterrent to casual sharing, not as hardware identity. Seat limits and
+online revalidation are the enforcement mechanism.
 
-### 1.5 Expiry checks trust the system clock — medium
-`hasExpired`, `hasMachineFileExpired` and the cache lifetime all compare against the wall clock. The
-"issued in the future means tampering" rule catches a clock set *ahead*, but a clock set *behind*
-extends offline access, silently.
+## Behaviours to design around
 
-Impact: offline enforcement is advisory. Any monotonic/last-seen-time anchor would be a design change
-beyond the port's scope.
+### A valid license may be validated and then not persisted — medium
 
-### 1.6 A failed init is swallowed — low
-The Tauri plugin's `setup` did `dbg!(err)` and fell back to a default (unlicensed) state;
-`service.ts` `init()` keeps that behaviour and logs through the injected `Logger`.
+When the OS vault is unusable, `validateKey` succeeds and keeps nothing on disk: the license does not
+survive a restart. This is deliberate (availability is probed before the network call, so a working
+validation never turns into a storage error), but the user needs to be told.
 
-Impact: if today's cache file is corrupt or fails verification, the app starts unlicensed with no
-user-visible signal, and a re-validation is required. Debugging relies on the host wiring the logger.
+Check `service.persistsLicenses` in the main process and surface it. On Linux, a `basic_text` backend
+— no secret store, so `safeStorage` encrypts under a hardcoded password — counts as unusable, and
+`checkout` refuses outright with `STORAGE_UNAVAILABLE` because a machine file whose key cannot be
+stored is unreadable.
 
-## 2. Weaknesses of the original that this port closes
+### Startup license state can be wrong with no user-visible signal — low
 
-### 2.1 Plaintext cached license key — fixed
-The original wrote `{app_data}/keygen/key` as plain bytes (`cache_license_key`, `fs::write`). Any
-process running as the user could read a paid license key. The port routes that file through
-Electron `safeStorage` and refuses plaintext: unavailable OS encryption raises `STORAGE_UNAVAILABLE`,
-undecryptable data raises `STORAGE_DECRYPT_FAILED` (no silent fallback).
+If the cache file is corrupt or fails verification, `init()` logs through the injected `Logger` and
+continues unlicensed; a re-validation is required. The reason is now readable in the main process as
+`service.startupDiagnostic` (sanitized message, no key material, deliberately not an IPC channel).
+Wire a logger that reaches your diagnostics.
 
-### 2.2 Unsigned/undated response acceptance — same rules, verified in tests
-Both implementations reject a missing `Keygen-Signature`, missing `Date`/`Digest`, digest mismatch,
-stale date and foreign signing key with `BAD_RESPONSE`. The port pins each branch with tests
-(`tests/client.test.ts`), including "HTTP 200 is never treated as license validity".
+## Fixed since the security review
 
-### 2.3 Panics on malformed machine files — fixed
-Rust `unwrap`/`expect` paths on bad base64 and wrong nonce/tag lengths crashed the host process. A
-malformed or hostile `machine.lic` was a crash trigger. The port turns every such path into
-`Failed decrypting machine file` / `Failed parsing decrypted machine file to json` errors
-(`tests/machine.test.ts`).
+| Was | Now |
+| --- | --- |
+| Validation cache held the license key in plaintext | whole cache record encrypted via `safeStorage`; verified after decrypt, so the `Digest` re-hash still runs on the original body |
+| A cache entry dated arbitrarily far in the future was always "fresh" | clock drift is checked in both directions; ±3 min still passes, +60 min does not |
+| The license key was cached even when the server said invalid, overwriting a previously good one | invalid results persist nothing and leave the old cached key alone |
+| Checkout sent `ttl=-100` for a maintained expired license | `ttl` is omitted, so the server default applies |
+| The renderer had to run unsandboxed for the ESM preload | a self-contained CommonJS preload is shipped, and the example runs `sandbox: true` — verified in Electron 45 |
+| Synchronous `safeStorage` only | async API on Electron 45+, sync fallback for older peers, `shouldReEncrypt` honoured by rewriting the file |
+| Linux without a keyring stored "encrypted" data under a hardcoded password | `basic_text` is treated as no vault at all |
+| `STORAGE_UNAVAILABLE` thrown after a successful validation | availability probed before the request; checkout fails before issuing an unreadable file |
+| A window with no registered handlers threw Electron's raw error into the renderer | `IPC_UNREACHABLE` — every rejection from the renderer API is a `KeygenError` (found by the live probe below) |
 
-### 2.4 Unrestricted command surface — fixed
-Tauri exposed the plugin commands to whatever the app's capabilities allowed; the port hard-requires
-a registered application window **and** the window's top frame, so an iframe or an untracked
-`WebContents` gets `UNTRUSTED_SENDER` before any argument is read, and every argument goes through a
-valibot schema (`tests/ipc.test.ts`, `tests/plugin.test.ts`).
+Two of these are still open as *documentation* problems rather than code problems: nothing here makes
+offline access tamper-proof, and encryption at rest does not stop someone who controls the running
+application.
 
-## 3. Limitations and open items in this port
+## Open items in this port
 
-### 3.1 The response cache still contains the license key — open, medium
-`storage.ts` `cacheResponse` writes `JSON.stringify(cache)`, and `cache.body` is the raw response
-text, which contains `data.attributes.key` — in plaintext (no `safeStorage`), because verification
-re-hashes the body and any redaction would break the `digest`.
+### Fingerprint collection blocks the main process — low
 
-Impact: the key is readable on disk by any process as the same user, which undercuts 2.1.
-Options (all behaviour-changing, so not chosen here): store the body only as the hash needed for
-replay checks, encrypt the whole cache file with `safeStorage` (the body would have to be re-hashed
-after decrypt, which works), or bind cache entries to the machine fingerprint.
+`lib/main/keygen/machine.ts` runs `reg query HKLM\SOFTWARE\Microsoft\Cryptography` / `ioreg`
+synchronously through `child_process`, so startup pays the subprocess latency. On failure the
+fingerprint is `""` and every validation fails with `NO_FINGERPRINT` — loud, but not actionable by the
+user. Fix if it bites: cache the value and move the query off the startup path.
 
-### 3.2 `STORAGE_UNAVAILABLE` arrives after a successful validation — open, medium
-`rawValidate` caches the response and updates state before `writeLicenseKey`, so on a machine with no
-OS keyring (common on headless/wayland-less Linux) a *successful* validation throws
-`STORAGE_UNAVAILABLE` to the renderer even though the license is now in state.
+### `keygenPreloadPath()` relies on self-reference resolution — low
 
-Impact: apps on such machines see an error dialog after a valid key, and `getLicense()` disagrees with
-the reported failure. Fix: make key caching best-effort with an explicit warning, or preflight
-`safeStorage.isEncryptionAvailable()` before the network call and disable key caching for the session.
+It resolves `import.meta.resolve("electron-plugin-keygen/preload")` with a relative-path fallback, as
+does `keygenSandboxedPreloadPath()`. A bundler that relocates your main entry — asar-less layouts,
+single-file bundles — can miss both. If that happens, bundle your own preload and import
+`electron-plugin-keygen/preload` from it, which is what the example does.
 
-### 3.3 ESM preload requires an unsandboxed renderer — known constraint
-An ESM preload script must be `.mjs`, and Electron only loads ESM preloads when `sandbox: false`.
-So the plugin's own preload (and the example) run with the renderer unsandboxed.
+Packaged-app layouts (asar, asar with unpacked files) have **not** been tested here; the example was
+verified as an unpacked build.
 
-Mitigation in place: `contextIsolation: true`, `nodeIntegration: false`, `webSecurity: true`, bridge
-limited to six methods over six fixed channels, window-open handler denied. A sandboxed variant would
-need a CommonJS preload build (`require` is unavailable in ESM) — see 3.4.
+### Extra arguments on no-argument channels are dropped, not rejected — low
 
-### 3.4 No CommonJS/sandboxed preload build — open, low
-`scripts/postbuild.mjs` renames `dist/preload/index.js` to `index.mjs` and nothing else is emitted.
-Hosts that require a sandboxed preload have no build to point at.
+The no-argument channels validate with `v.tuple([])`, which tolerates extra positional values. They
+never reach the service because handlers only pass the first parsed argument (pinned by a test), but
+that is not "strict rejection". Fix if you want the stronger statement: assert `args.length === 0` per
+channel.
 
-Next step if needed: emit `dist/preload/index.cjs` as well (same bridge, `require`-based) and add a
-`./preload/cjs` export. Untouched until a consumer needs it.
+### OS-backed encryption is untested in CI — medium
 
-### 3.5 Fingerprint collection blocks the main process — open, low
-`machine.ts` runs `reg query HKLM\SOFTWARE\Microsoft\Cryptography` / `ioreg` synchronously via
-`child_process`. Startup takes the subprocess latency; on failure the fingerprint is `""` and every
-validation fails with `NO_FINGERPRINT`.
+`safeStorage` needs a real DPAPI session, Keychain, or keyring. The tests inject a fake codec, so what
+is verified is the *policy* — never plaintext, explicit `STORAGE_UNAVAILABLE` /
+`STORAGE_DECRYPT_FAILED`, cache encryption round-trip — and not the platform encryption itself.
+Anyone claiming "the license key is encrypted at rest on all platforms" has not tested it here. A real
+DPAPI round trip on Windows, plus a Keychain and a libsecret run, are still outstanding.
 
-Impact: a slow or locked registry query delays app start; the failure mode is loud (error code) but
-not actionable by the user. Fix: cache the value, and/or run the query off the startup path.
+### What the sandboxed preload was verified against — note
 
-### 3.6 `keygenPreloadPath()` relies on self-reference resolution — open, low
-It uses `import.meta.resolve("electron-plugin-keygen/preload")` with a relative-path fallback
-(`../preload/index.mjs`). A bundler that rewrites the main entry's location (asar-less layouts,
-single-file bundles) can land outside `dist/` and miss both.
+Both shipped preload artifacts (`example/out/preload/index.cjs` and `dist/preload/sandboxed.cjs`) were
+loaded in a live Electron 45 window with `sandbox: true` and `contextIsolation: true`, and from the
+main world `window.keygen` exposed exactly the six bridge methods, with no `process` visible. The
+probe called `getLicenseKey()` with no `registerKeygen` in the process: the invoke reached
+`keygen:get-license-key` and failed with "No handler registered" — which is what surfaced the gap the
+`IPC_UNREACHABLE` code now closes, so a host that forgot to register gets a `KeygenError` like every
+other failure. The ESM entry (`keygenPreloadPath()`) is covered by the parity test but is only loadable
+unsandboxed, by Electron's own rule.
 
-Workaround for such hosts: call `installKeygenBridge()` from their own preload, which the example
-demonstrates.
+## Where this port diverges from `tauri-plugin-keygen` v2
 
-### 3.7 `v.tuple([])` does not reject extra arguments — open, low
-The no-argument channels use `emptyArgs = v.tuple([])`, which tolerates extra positional values —
-they are dropped because handlers only ever pass `parsed[0]`, so nothing reaches the service (pinned
-by a test), but "strict rejection" would be a stronger statement. Fix if desired: assert
-`args.length === 0` per channel.
+The four rows marked "was/now" above that change licensing semantics — invalid keys not cached,
+`ttl` omitted instead of negative, bounded drift, encrypted cache — are intentional divergences from
+the Tauri host, accepted after a security review. A side-by-side comparison of two hosts will now
+disagree on those points. Everything else is still a faithful port: same endpoints, same signed
+payload, same `machine.lic` format, same renderer API.
 
-### 3.8 OS-backed encryption is untested in CI — known gap
-`safeStorage` needs a real keyring/DPAPI session. The tests inject a fake codec, so what is verified
-is the *policy* (never plaintext, explicit failure codes), not DPAPI/Keychain/libsecret behaviour
-itself. Anyone claiming "the key is encrypted at rest on all platforms" has not tested it here.
+- Storage lives under `app.getPath("userData")`, not Tauri's `app_data_dir`; existing data does not
+  migrate, so a migrated app starts unlicensed and re-activates.
+- The User-Agent reports the Electron engine rather than WebView2/WebKit, so Keygen-side machine
+  metadata differs from a Tauri install of the same app.
+- Activation and Checkout request/response formats are unchanged — nothing on the Key.sh side is
+  required.
+- A malformed `machine.lic` crashes the Tauri host on Rust `unwrap` paths; here it is a
+  `Failed decrypting machine file` error.
 
-### 3.9 Deviations that could matter to a server-side integration — known
-- User-Agent reports the Electron engine rather than Tauri's WebView2/WebKit version, so Keygen
-  `whoami`-style metadata differs from a Tauri install of the same app.
-- `app.getPath("userData")` replaces Tauri's `app_data_dir`; existing installs' data does not migrate.
-- `Activation`/`Checkout` request/response formats are unchanged, so a server that accepts one accepts
-  the other — no Key.sh-side work is required.
+## Upstream
+
+The findings that come from the original plugin, and are therefore worth reporting to
+`bagindo/tauri-plugin-keygen` rather than only noting here: plaintext key cache, plaintext response
+cache, unbounded future-dated acceptance, negative `ttl`, and the swallowed setup failure. This port
+fixes them for Electron hosts only; the Rust plugin still behaves as described.
