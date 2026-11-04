@@ -1,0 +1,15 @@
+{
+	"extends": "./tsconfig.node.json",
+	"compilerOptions": {
+		"module": "NodeNext",
+		"moduleResolution": "NodeNext",
+		"noEmit": false,
+		"rootDir": "lib",
+		"outDir": "dist",
+		"declaration": true,
+		"declarationMap": false,
+		"sourceMap": false,
+		"rewriteRelativeImportExtensions": true
+	},
+	"include": ["lib/**/*"]
+}
