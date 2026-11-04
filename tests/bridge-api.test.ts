@@ -128,6 +128,19 @@ test("a malformed IPC response fails closed", async () => {
 	}
 });
 
+test("a bridge that rejects is still a KeygenError, not a raw IPC failure", async () => {
+	// what a host sees when preload is installed but registerKeygen never ran
+	const api = createKeygenLicensingApi(
+		bridgeReturning(Promise.reject(new Error("No handler registered for 'keygen:get-license'"))),
+	);
+	await assert.rejects(api.getLicense(), (err: unknown) => {
+		assert.ok(err instanceof KeygenError);
+		assert.equal(err.code, "IPC_UNREACHABLE");
+		assert.match(err.detail, /No handler registered/);
+		return true;
+	});
+});
+
 test("without a bridge every call is refused rather than silently succeeding", async () => {
 	const api = createKeygenLicensingApi(null);
 	await assert.rejects(api.getLicense(), (err: unknown) => {

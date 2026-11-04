@@ -47,7 +47,14 @@ function bind(read: () => KeygenBridge | null): KeygenLicensingAPI {
 				detail: "window.keygen is unavailable: is the keygen preload script attached to this window?",
 			});
 		}
-		const res = (await run(bridge)) as IpcResult<T> | null | undefined;
+		// A rejection here means the call never reached a licensing handler.
+		// Electron's own message names the channel, never license data.
+		const res = (await run(bridge).catch((err: unknown) => {
+			throw new KeygenError({
+				code: "IPC_UNREACHABLE",
+				detail: err instanceof Error ? err.message : String(err),
+			});
+		})) as IpcResult<T> | null | undefined;
 		if (res && res.ok === true) return res.data;
 		if (res && res.ok === false && res.error) throw new KeygenError(res.error);
 		throw new KeygenError({ code: "unknown", detail: "Malformed IPC response" });
