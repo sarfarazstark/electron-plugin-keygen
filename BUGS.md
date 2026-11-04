@@ -67,11 +67,18 @@ Wire a logger that reaches your diagnostics.
 | Synchronous `safeStorage` only | async API on Electron 45+, sync fallback for older peers, `shouldReEncrypt` honoured by rewriting the file |
 | Linux without a keyring stored "encrypted" data under a hardcoded password | `basic_text` is treated as no vault at all |
 | `STORAGE_UNAVAILABLE` thrown after a successful validation | availability probed before the request; checkout fails before issuing an unreadable file |
+| The async `safeStorage` trio was called detached from its object | bound once in `vault.ts`; Electron's native bindings throw "Illegal invocation" otherwise, the availability probe read that as "no vault", and on Electron 45 nothing persisted at all |
 | A window with no registered handlers threw Electron's raw error into the renderer | `IPC_UNREACHABLE` — every rejection from the renderer API is a `KeygenError` (found by the live probe below) |
 
 Two of these are still open as *documentation* problems rather than code problems: nothing here makes
 offline access tamper-proof, and encryption at rest does not stop someone who controls the running
 application.
+
+The detached-bindings row is not a finding from the review — it is a regression this port introduced
+when it moved to the async API, and 151 passing tests did not see it because every one of them injected
+a plain-object codec. Detached methods on a plain object work fine. It surfaced the first time the real
+`safeStorage` was called, and it is the reason this file now distinguishes "tested" from "run against
+Electron".
 
 ## Open items in this port
 
@@ -101,22 +108,40 @@ channel.
 
 ### OS-backed encryption is untested in CI — medium
 
-`safeStorage` needs a real DPAPI session, Keychain, or keyring. The tests inject a fake codec, so what
-is verified is the *policy* — never plaintext, explicit `STORAGE_UNAVAILABLE` /
-`STORAGE_DECRYPT_FAILED`, cache encryption round-trip — and not the platform encryption itself.
-Anyone claiming "the license key is encrypted at rest on all platforms" has not tested it here. A real
-DPAPI round trip on Windows, plus a Keychain and a libsecret run, are still outstanding.
+`safeStorage` needs a real DPAPI session, Keychain, or keyring, and CI has none of them. The tests
+inject a fake codec, so what they verify is the *policy* — never plaintext, explicit
+`STORAGE_UNAVAILABLE` / `STORAGE_DECRYPT_FAILED`, cache round-trip — not the platform itself.
 
-### What the sandboxed preload was verified against — note
+What has been run by hand, on Windows against a real Electron 45 session and the built `dist/`, via
+`npm run verify:electron` (it exits non-zero, so a host can run it in CI on a machine with a vault):
 
-Both shipped preload artifacts (`example/out/preload/index.cjs` and `dist/preload/sandboxed.cjs`) were
-loaded in a live Electron 45 window with `sandbox: true` and `contextIsolation: true`, and from the
-main world `window.keygen` exposed exactly the six bridge methods, with no `process` visible. The
-probe called `getLicenseKey()` with no `registerKeygen` in the process: the invoke reached
-`keygen:get-license-key` and failed with "No handler registered" — which is what surfaced the gap the
-`IPC_UNREACHABLE` code now closes, so a host that forgot to register gets a `KeygenError` like every
-other failure. The ESM entry (`keygenPreloadPath()`) is covered by the parity test but is only loadable
-unsandboxed, by Electron's own rule.
+- codec availability and the sync API both report a vault (DPAPI on Windows; `getSelectedStorageBackend`
+  is Linux-only and reports `n/a` here)
+- license key: written, 62 bytes of ciphertext on disk, the plaintext key is not present in the file,
+  reads back equal
+- validation cache: a `KGC1` envelope, 401 bytes, neither the license key nor the signature string
+  appears in the file, and the record decrypts back to what went in
+- flipping the last eight characters of the cache, or four bytes of the key ciphertext, makes the read
+  throw `STORAGE_DECRYPT_FAILED` rather than return garbage
+- a cache file written without the envelope — the pre-encryption format — is deleted on sight and the
+  read returns `null`, so an unprotected copy cannot be replayed after an upgrade
+
+Not run: macOS Keychain, Linux libsecret, and the `basic_text` branch — that path is argued from
+Electron's documented behaviour, not observed. Anyone extending this to "encrypted at rest on all
+platforms" has overclaimed the evidence.
+
+### What the preload scripts were verified against — note
+
+`npm run verify:electron` loads each shipped preload into a live Electron 45 renderer and reads the
+bridge back from the main world: `dist/preload/sandboxed.cjs` and `example/out/preload/index.cjs` under
+`sandbox: true`, `dist/preload/index.mjs` under `sandbox: false` (Electron refuses ESM preloads in a
+sandbox). All three expose exactly the six methods, and in the sandboxed renderers `window.process` is
+absent, so nothing about the Node environment reaches the page.
+
+The first run of that check also produced the `IPC_UNREACHABLE` fix: it called `getLicenseKey()` with no
+`registerKeygen` in the process, the invoke reached `keygen:get-license-key`, and Electron's raw "No
+handler registered" error surfaced in the renderer where `isKeygenError(err)` said it was not a keygen
+error. A host that forgets to wire the main process now gets a `KeygenError` like every other failure.
 
 ## Where this port diverges from `tauri-plugin-keygen` v2
 

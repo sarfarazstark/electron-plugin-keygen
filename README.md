@@ -167,7 +167,12 @@ npm test             # node --test with mocked Keygen HTTP; no real activations
 npm run typecheck
 npm run lint
 npm run dev          # runs the example app
+npm run verify:electron   # after build: real OS vault + live renderer, see BUGS.md
 ```
+
+`npm test` mocks the network and injects a fake codec, so it verifies policy. `verify:electron` is the
+part that needs a real session: `safeStorage` through DPAPI / Keychain / libsecret, and both preload
+entry points loaded into a live renderer — the layer that a mocked codec cannot catch.
 
 `example/` is a complete Electron app consuming the published surface (`file:..` dependency).
 `tauri/` is the upstream plugin kept as the reference for this port — it is not built or shipped.
