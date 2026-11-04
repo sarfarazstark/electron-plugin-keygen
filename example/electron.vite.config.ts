@@ -15,8 +15,12 @@ export default defineConfig({
 	},
 	preload: {
 		build: {
+			// Sandboxed preloads are plain CommonJS and cannot require sibling files,
+			// so the plugin's preload code is bundled in here instead of externalized.
+			externalizeDeps: false,
 			rollupOptions: {
 				input: { index: path.resolve(root, "src/preload/index.ts") },
+				output: { format: "cjs", entryFileNames: "[name].cjs" },
 			},
 		},
 	},

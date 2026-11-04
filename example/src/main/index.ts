@@ -17,11 +17,13 @@ function createWindow(): BrowserWindow {
 		autoHideMenuBar: true,
 		title: app.name,
 		webPreferences: {
-			preload: fileURLToPath(new URL("../preload/index.mjs", import.meta.url)),
+			// Bundled to a single CommonJS file (see electron.vite.config.ts): a
+			// sandboxed preload cannot require sibling modules, so the plugin's
+			// bridge has to be inside this file. That keeps the renderer sandboxed.
+			preload: fileURLToPath(new URL("../preload/index.cjs", import.meta.url)),
 			contextIsolation: true,
 			nodeIntegration: false,
-			// ESM preload scripts require an unsandboxed renderer
-			sandbox: false,
+			sandbox: true,
 			webSecurity: true,
 		},
 	});
