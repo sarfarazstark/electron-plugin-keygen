@@ -4,6 +4,9 @@ Keygen.sh licensing for Electron. Port of `tauri-plugin-keygen` (v2): same rende
 cryptography, same on-disk machine license format, with the Tauri shell replaced by Electron's
 process model — the main process owns licensing, the renderer reaches it over six fixed channels.
 
+`FEATURES.md` is the reference for what is included: every entry point, the API shapes, the IPC contract,
+and the flow of a licensing call across the processes.
+
 ```
 npm install electron-plugin-keygen
 ```
