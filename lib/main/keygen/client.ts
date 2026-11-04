@@ -111,9 +111,12 @@ export class KeygenClient {
 		const dateMs = Date.parse(data.date);
 		if (Number.isNaN(dateMs)) throw badResponse("Invalid signature date");
 
-		// chrono's num_minutes truncates toward zero; negative (future dates) pass.
-		const minutesSinceResponse = Math.trunc((now - dateMs) / 60000);
-		if (this.config.maxClockDrift >= 0 && minutesSinceResponse > this.config.maxClockDrift) {
+		// Deviation from tauri-plugin-keygen v2, which compares signed minutes and
+		// so accepts a Date arbitrarily far in the future: that turns one captured
+		// response plus a rolled-back clock into an indefinitely fresh one.
+		// Truncation is kept so the tolerance for *past* skew is unchanged.
+		const minutesFromNow = Math.trunc(Math.abs(now - dateMs) / 60000);
+		if (this.config.maxClockDrift >= 0 && minutesFromNow > this.config.maxClockDrift) {
 			throw badResponse("Request date too old");
 		}
 

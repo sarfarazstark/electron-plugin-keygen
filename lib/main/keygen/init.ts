@@ -4,6 +4,7 @@ import type { KeygenConfigInput } from "./config.ts";
 import { buildDefaultHeaders, resolveConfig } from "./config.ts";
 import { KeygenClient } from "./client.ts";
 import { createMachine } from "./machine.ts";
+import type { SecretCodec } from "./storage.ts";
 import { KeygenStorage } from "./storage.ts";
 import { LicensingService, type Logger } from "./service.ts";
 
@@ -13,11 +14,38 @@ import { LicensingService, type Logger } from "./service.ts";
  * build/run time — nothing licensing-critical is hardcoded.
  */
 
-export function buildSafeStorageCodec() {
+/** The async API only exists from Electron 45; older peers get the sync calls. */
+type AsyncSafeStorage = {
+	isAsyncEncryptionAvailable?: () => Promise<boolean>;
+	encryptStringAsync?: (plaintext: string) => Promise<Buffer>;
+	decryptStringAsync?: (blob: Buffer) => Promise<{ result: string; shouldReEncrypt?: boolean }>;
+};
+
+export function buildSafeStorageCodec(): SecretCodec {
+	const { isAsyncEncryptionAvailable, encryptStringAsync, decryptStringAsync } =
+		safeStorage as typeof safeStorage & AsyncSafeStorage;
+	const hasAsync =
+		typeof isAsyncEncryptionAvailable === "function" &&
+		typeof encryptStringAsync === "function" &&
+		typeof decryptStringAsync === "function";
+
 	return {
-		isAvailable: () => safeStorage.isEncryptionAvailable(),
-		encrypt: (plaintext: string) => safeStorage.encryptString(plaintext),
-		decrypt: (blob: Buffer) => safeStorage.decryptString(blob),
+		isAvailable: async () => {
+			// On Linux with no secret store, safeStorage encrypts under a hardcoded
+			// password and still reports itself available — that is plaintext with
+			// extra steps, so the vault counts as unavailable and nothing is written.
+			if (process.platform === "linux" && safeStorage.getSelectedStorageBackend() === "basic_text") {
+				return false;
+			}
+			return hasAsync ? await isAsyncEncryptionAvailable() : safeStorage.isEncryptionAvailable();
+		},
+		encrypt: async (plaintext) =>
+			hasAsync ? await encryptStringAsync(plaintext) : safeStorage.encryptString(plaintext),
+		decrypt: async (blob) => {
+			if (!hasAsync) return { plaintext: safeStorage.decryptString(blob), reencrypt: false };
+			const out = await decryptStringAsync(blob);
+			return { plaintext: out.result, reencrypt: out.shouldReEncrypt === true };
+		},
 	};
 }
 
@@ -30,7 +58,7 @@ export type InitArgs = {
 	config: KeygenConfigInput | null;
 };
 
-export function createLicensingService(args: InitArgs): LicensingService | null {
+export async function createLicensingService(args: InitArgs): Promise<LicensingService | null> {
 	if (args.config === null) {
 		args.log.warn("keygen: no configuration (KEYGEN_VERIFY_KEY unset); licensing disabled");
 		return null;
@@ -50,7 +78,7 @@ export function createLicensingService(args: InitArgs): LicensingService | null 
 		locale: args.locale,
 	});
 
-	const storage = new KeygenStorage(args.userDataDir, buildSafeStorageCodec());
+	const storage = new KeygenStorage(args.userDataDir, buildSafeStorageCodec(), args.log);
 	const client = new KeygenClient(
 		config,
 		(url, init) => fetch(url, init) as unknown as Promise<import("./client.ts").FetchResponseLike>,
@@ -58,6 +86,6 @@ export function createLicensingService(args: InitArgs): LicensingService | null 
 	);
 
 	const service = new LicensingService({ machine, storage, client, log: args.log });
-	service.init();
+	await service.init();
 	return service;
 }

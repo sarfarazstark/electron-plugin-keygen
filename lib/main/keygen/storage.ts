@@ -8,24 +8,49 @@ import type { KeygenResponseCache } from "./sig.ts";
  * Replaces the Tauri filesystem/paths layer with `app.getPath("userData")`.
  * Layout preserved from the original:
  *   userData/keygen/machine.lic          (offline machine license cert, raw format)
- *   userData/keygen/key                  (cached license key — safeStorage-encrypted here)
- *   userData/keygen/validation_cache/    (per-day validation response caches)
+ *   userData/keygen/key                  (cached license key — safeStorage-encrypted)
+ *   userData/keygen/validation_cache/    (per-day validation response caches, encrypted)
  */
 
 /** OS-backed secret storage seam so tests and non-Electron hosts don't import electron. */
 export type SecretCodec = {
-	isAvailable(): boolean;
-	encrypt(plaintext: string): Buffer;
-	decrypt(blob: Buffer): string;
+	isAvailable(): Promise<boolean>;
+	encrypt(plaintext: string): Promise<Buffer>;
+	/** `reencrypt` is Electron's key-rotation signal: the caller should rewrite the blob. */
+	decrypt(blob: Buffer): Promise<{ plaintext: string; reencrypt: boolean }>;
 };
+
+export type StorageLogger = { warn: (msg: string) => void };
+
+/**
+ * A cached response is a signed copy of the whole validate-key body, license key
+ * included, so it is encrypted like the cached key. The prefix lets the loader
+ * tell an encrypted entry from a pre-fix plaintext one rather than guessing from
+ * bytes that happen to fail decryption.
+ */
+const CACHE_MAGIC = "KGC1\n";
 
 export class KeygenStorage {
 	private readonly baseDir: string;
 	private readonly codec: SecretCodec;
+	private readonly log: StorageLogger | null;
 
-	constructor(userDataDir: string, codec: SecretCodec) {
+	constructor(userDataDir: string, codec: SecretCodec, log: StorageLogger | null = null) {
 		this.baseDir = path.join(userDataDir, "keygen");
 		this.codec = codec;
+		this.log = log;
+	}
+
+	/**
+	 * Callers gate persistence on this so an unavailable vault is known before a
+	 * network round trip, not after a validation has already succeeded.
+	 */
+	async encryptionAvailable(): Promise<boolean> {
+		try {
+			return await this.codec.isAvailable();
+		} catch {
+			return false;
+		}
 	}
 
 	/* ------------------------------ machine file ------------------------------ */
@@ -56,41 +81,23 @@ export class KeygenStorage {
 		return path.join(this.baseDir, "key");
 	}
 
-	/**
-	 * Writes the license key encrypted via safeStorage. Never falls back to
-	 * plaintext: silently downgrading a licensing secret is worse than failing.
-	 */
-	writeLicenseKey(key: string): void {
+	async writeLicenseKey(key: string): Promise<void> {
 		fs.mkdirSync(this.baseDir, { recursive: true });
-		if (!this.codec.isAvailable()) {
-			throw licenseErr(
-				"STORAGE_UNAVAILABLE",
-				"OS-backed encryption is unavailable; refusing to store the license key in plaintext",
-			);
-		}
-		let blob: Buffer;
-		try {
-			blob = this.codec.encrypt(key);
-		} catch {
-			throw licenseErr("STORAGE_UNAVAILABLE", "Failed encrypting the license key");
-		}
+		await this.guard("store the license key in plaintext");
+		const blob = await this.encrypt(key, "Failed encrypting the license key");
 		fs.writeFileSync(this.keyFilePath(), blob);
 	}
 
-	readLicenseKey(): string | null {
+	async readLicenseKey(): Promise<string | null> {
 		const p = this.keyFilePath();
 		if (!fs.existsSync(p)) return null;
-		if (!this.codec.isAvailable()) {
-			throw licenseErr(
-				"STORAGE_UNAVAILABLE",
-				"OS-backed encryption became unavailable; cannot read the cached license key",
-			);
-		}
-		try {
-			return this.codec.decrypt(fs.readFileSync(p));
-		} catch {
-			throw licenseErr("STORAGE_DECRYPT_FAILED", "Failed decrypting the cached license key");
-		}
+		await this.guard("read the cached license key");
+		const { plaintext, reencrypt } = await this.decrypt(
+			fs.readFileSync(p),
+			"Failed decrypting the cached license key",
+		);
+		if (reencrypt) await this.rewrite(p, plaintext, null);
+		return plaintext;
 	}
 
 	removeLicenseKey(): void {
@@ -114,21 +121,38 @@ export class KeygenStorage {
 		return path.join(dir, sha256Hex(`${licenseKey}:${toLocalDateNaive(date)}`));
 	}
 
-	cacheResponse(licenseKey: string, cache: KeygenResponseCache): void {
+	async cacheResponse(licenseKey: string, cache: KeygenResponseCache): Promise<void> {
 		const p = this.responseCachePath(licenseKey);
-		fs.writeFileSync(p, JSON.stringify(cache), "utf8");
+		await this.guard("store the validation cache in plaintext");
+		const blob = await this.encrypt(JSON.stringify(cache), "Failed encrypting the validation cache");
+		fs.writeFileSync(p, CACHE_MAGIC + blob.toString("base64"));
 	}
 
-	loadResponseCache(
+	async loadResponseCache(
 		licenseKey: string,
 		date = new Date(),
-	): { cache: KeygenResponseCache; path: string } | null {
+	): Promise<{ cache: KeygenResponseCache; path: string } | null> {
 		const p = this.responseCachePath(licenseKey, date);
 		if (!fs.existsSync(p)) return null;
 
+		const raw = fs.readFileSync(p, "utf8");
+		if (!raw.startsWith(CACHE_MAGIC)) {
+			// Written before caches were encrypted: an unprotected copy of the license
+			// key. Deleted instead of read, so the app revalidates online.
+			fs.rmSync(p, { force: true });
+			this.log?.warn("removed an unencrypted validation cache; the license must be revalidated");
+			return null;
+		}
+
+		await this.guard("read the validation cache");
+		const { plaintext, reencrypt } = await this.decrypt(
+			Buffer.from(raw.slice(CACHE_MAGIC.length), "base64"),
+			"Failed decrypting the validation cache",
+		);
+
 		let cache: unknown;
 		try {
-			cache = JSON.parse(fs.readFileSync(p, "utf8"));
+			cache = JSON.parse(plaintext);
 		} catch {
 			throw parseErr("Failed parsing response cache to json");
 		}
@@ -141,6 +165,7 @@ export class KeygenStorage {
 		) {
 			throw parseErr("Failed deserializing response cache");
 		}
+		if (reencrypt) await this.rewrite(p, plaintext, CACHE_MAGIC);
 		return { cache: cache as KeygenResponseCache, path: p };
 	}
 
@@ -156,6 +181,41 @@ export class KeygenStorage {
 		for (const entry of fs.readdirSync(dir)) {
 			const p = path.join(dir, entry);
 			if (fs.statSync(p).isFile() && p !== keepPath) fs.unlinkSync(p);
+		}
+	}
+
+	/* -------------------------------- codec --------------------------------- */
+
+	/** Never a plaintext fallback: an unusable vault is an explicit error. */
+	private async guard(refuse: string): Promise<void> {
+		if (!(await this.encryptionAvailable())) {
+			throw licenseErr("STORAGE_UNAVAILABLE", `OS-backed encryption is unavailable; refusing to ${refuse}`);
+		}
+	}
+
+	private async encrypt(plaintext: string, failure: string): Promise<Buffer> {
+		try {
+			return await this.codec.encrypt(plaintext);
+		} catch {
+			throw licenseErr("STORAGE_UNAVAILABLE", failure);
+		}
+	}
+
+	private async decrypt(blob: Buffer, failure: string): Promise<{ plaintext: string; reencrypt: boolean }> {
+		try {
+			return await this.codec.decrypt(blob);
+		} catch {
+			throw licenseErr("STORAGE_DECRYPT_FAILED", failure);
+		}
+	}
+
+	/** Key rotation: rewrite under the current key. Failing to do so is not fatal. */
+	private async rewrite(p: string, plaintext: string, magic: string | null): Promise<void> {
+		try {
+			const blob = await this.codec.encrypt(plaintext);
+			fs.writeFileSync(p, magic === null ? blob : magic + blob.toString("base64"));
+		} catch (err) {
+			this.log?.warn(`failed to re-encrypt licensing data after a key rotation: ${String(err)}`);
 		}
 	}
 }

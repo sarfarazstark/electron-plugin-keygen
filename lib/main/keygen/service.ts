@@ -42,24 +42,44 @@ export class LicensingService {
 	private license: License | null = null;
 	private readonly now: () => number;
 	private readonly deps: ServiceDeps;
+	private vaultUsable = true;
+	private startupError: string | null = null;
 
 	constructor(deps: ServiceDeps) {
 		this.deps = deps;
 		this.now = deps.now ?? Date.now;
 	}
 
+	/**
+	 * False when the OS vault cannot hold licensing secrets: validations still
+	 * succeed, but nothing is persisted and the license will not survive a
+	 * restart. Main-process only — the renderer has no business reading it.
+	 */
+	get persistsLicenses(): boolean {
+		return this.vaultUsable;
+	}
+
 	/** lib.rs setup: LicensedState::load or default (null) on any error. */
-	init(): void {
+	async init(): Promise<void> {
+		this.vaultUsable = await this.deps.storage.encryptionAvailable();
+		if (!this.vaultUsable) {
+			this.deps.log.warn(
+				"OS-backed encryption is unavailable; license keys and validation caches will not be persisted",
+			);
+		}
 		try {
-			this.license = this.load();
+			this.license = await this.load();
 		} catch (err) {
+			// Kept visible through the host's Logger rather than re-thrown: the app
+			// starts unlicensed either way, and a stack trace would carry cache paths.
+			this.startupError = describe(err);
 			this.deps.log.warn(`licensing init failed, starting unlicensed: ${describe(err)}`);
 			this.license = null;
 		}
 	}
 
-	private load(): License | null {
-		const key = this.deps.storage.readLicenseKey();
+	private async load(): Promise<License | null> {
+		const key = await this.deps.storage.readLicenseKey();
 		if (key === null) return null;
 
 		// 1. offline machine license file
@@ -76,7 +96,7 @@ export class LicensingService {
 		}
 
 		// 2. validation response cache for today
-		const cached = this.deps.storage.loadResponseCache(key);
+		const cached = await this.deps.storage.loadResponseCache(key);
 		if (cached !== null) {
 			try {
 				this.deps.storage.clearResponseCacheExcept(cached.path);
@@ -116,8 +136,13 @@ export class LicensingService {
 		return this.license === null ? null : toPublicLicense(this.license);
 	}
 
-	getLicenseKey(): string | null {
+	async getLicenseKey(): Promise<string | null> {
 		return this.deps.storage.readLicenseKey();
+	}
+
+	/** Sanitized reason startup left the app unlicensed, for host diagnostics (main process). */
+	get startupDiagnostic(): string | null {
+		return this.startupError;
 	}
 
 	/* --------------------------- validate flow ---------------------------- */
@@ -156,6 +181,10 @@ export class LicensingService {
 			);
 		}
 
+		// Probed before the request so an unusable vault cannot turn a successful
+		// validation into a storage error after the fact.
+		this.vaultUsable = await this.deps.storage.encryptionAvailable();
+
 		const url = this.deps.client.buildUrl("licenses/actions/validate-key");
 		const scope: Record<string, unknown> = { fingerprint: machine.fingerprint };
 		if (entitlements.length > 0) scope.entitlements = entitlements;
@@ -181,14 +210,23 @@ export class LicensingService {
 				throw badResponse("Missing data on license validation response");
 			}
 
-			// command.rs ordering matters: cache response, then update state,
-			// then cache the license key — and the key is cached even when the
-			// license is invalid.
-			if (license.valid && cacheValidResponse && license.expiry !== null) {
-				this.deps.storage.cacheResponse(license.key, resCache);
+			// Deviation from commands.rs, which cached the key unconditionally: an
+			// invalid (revoked, banned, expired-without-grace) key is never written,
+			// and an invalid result never overwrites a previously cached key either.
+			// Persistence happens before the state assignment so that a storage
+			// failure leaves the reported result and getLicense() agreeing.
+			if (license.valid && this.vaultUsable) {
+				if (cacheValidResponse && license.expiry !== null) {
+					await this.deps.storage.cacheResponse(license.key, resCache);
+				}
+				await this.deps.storage.writeLicenseKey(license.key);
+			}
+			if (license.valid && !this.vaultUsable) {
+				this.deps.log.warn(
+					"validated but did not persist the license key: OS-backed encryption is unavailable, so this license will not survive a restart",
+				);
 			}
 			this.license = license;
-			this.deps.storage.writeLicenseKey(license.key);
 
 			return license;
 		}
@@ -266,6 +304,15 @@ export class LicensingService {
 		if (hasExpired(license, this.now()) && !shouldMaintainAccess(license)) {
 			throw licenseErr("EXPIRED", "Can't checkout machine file. License has expired");
 		}
+		// A machine file is encrypted under sha256(key || fingerprint), so it is
+		// unreadable without the cached key. Issuing one that the next launch cannot
+		// decrypt would claim offline access that does not exist.
+		if (!(await this.deps.storage.encryptionAvailable())) {
+			throw licenseErr(
+				"STORAGE_UNAVAILABLE",
+				"Can't checkout machine file. OS-backed encryption is unavailable, so the license key needed to read the machine file cannot be persisted",
+			);
+		}
 
 		// ttl: min 1 hour, max 1 year (u32 in Rust — clamp bounds identical)
 		const clamped = Math.trunc(Math.min(Math.max(ttlSeconds, 3600), 31_556_952));
@@ -282,9 +329,13 @@ export class LicensingService {
 		];
 		if (ttlForever && shouldMaintainAccess(license)) {
 			params.push(["ttl", ""]); // perpetual fallback license
-		} else {
+		} else if (ttlValue > 0) {
 			params.push(["ttl", String(ttlValue)]);
 		}
+		// Otherwise omitted: a license already past its expiry has no remaining
+		// lifetime, and the original sent the negative value verbatim (ttl=-100).
+		// Clamping up to a floor would hand out offline access the licence does not
+		// have, so the server default applies instead.
 
 		const url = this.deps.client.buildUrl(
 			`machines/${this.deps.machine.fingerprint}/actions/check-out`,

@@ -108,6 +108,24 @@ test("verifyResponse allows a small clock drift", () => {
 	assert.doesNotThrow(() => client.verifyResponse("post", targetUrl(), res.headers, body, clock.now()));
 });
 
+test("verifyResponse rejects a Date header far in the future", () => {
+	const { client, clock } = makeClient();
+	// Signed minutes used to be compared without abs(), so a negative age always
+	// passed: one captured response plus a rolled-back clock stayed "fresh" forever.
+	const res = signedResponse({ keys, url: targetUrl(), body, now: clock.now, dateOffsetMs: 60 * 60_000 });
+	assert.throws(
+		() => client.verifyResponse("post", targetUrl(), res.headers, body, clock.now()),
+		/Request date too old/,
+	);
+});
+
+test("verifyResponse tolerates a slightly future Date header", () => {
+	const { client, clock } = makeClient();
+	// The bound is symmetric, not tighter than the past tolerance it replaces.
+	const res = signedResponse({ keys, url: targetUrl(), body, now: clock.now, dateOffsetMs: 3 * 60_000 });
+	assert.doesNotThrow(() => client.verifyResponse("post", targetUrl(), res.headers, body, clock.now()));
+});
+
 test("verifyResponse rejects a signature made by another key", () => {
 	const { client, clock } = makeClient();
 	const rogue = generateTestKeys();

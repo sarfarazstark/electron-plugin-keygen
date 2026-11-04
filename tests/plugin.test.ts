@@ -81,7 +81,7 @@ test("channels exist before the app is ready and refuse until the service is bui
 		config,
 		getTrustedWebContentsIds: () => [1],
 		log: { info() {}, warn() {}, error() {} },
-		createService: (args) => {
+		createService: async (args) => {
 			created.push(args);
 			return null;
 		},
@@ -110,7 +110,7 @@ test("the service is built from app metadata once ready", async () => {
 		config,
 		getTrustedWebContentsIds: () => [1],
 		log: { info() {}, warn() {}, error() {} },
-		createService: (args) => {
+		createService: async (args) => {
 			seen = args;
 			return fake;
 		},
@@ -161,7 +161,7 @@ test("untrusted senders are rejected regardless of service state", async () => {
 		config,
 		getTrustedWebContentsIds: () => [1],
 		log: { info() {}, warn() {}, error() {} },
-		createService: () => ({ getLicense: () => null }) as unknown as LicensingService,
+		createService: async () => ({ getLicense: () => null }) as unknown as LicensingService,
 	});
 
 	const res = (await handlers.get(KEYGEN_CHANNELS.getLicense)?.({ sender: { id: 99 } })) as {
@@ -185,7 +185,7 @@ test("config omitted means the host reads KEYGEN_* from the environment", async 
 			ipc,
 			getTrustedWebContentsIds: () => [1],
 			log: { info() {}, warn() {}, error() {} },
-			createService: (args) => {
+			createService: async (args) => {
 				seen = args;
 				return null;
 			},

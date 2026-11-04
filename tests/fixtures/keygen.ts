@@ -272,17 +272,19 @@ export function buildMachineCert(init: MachineCertInit): string {
 export function fakeCodec(available = true): SecretCodec & { setAvailable(v: boolean): void } {
 	const codec = {
 		available,
-		isAvailable() {
+		async isAvailable() {
 			return codec.available;
 		},
 		setAvailable(v: boolean) {
 			codec.available = v;
 		},
-		encrypt: (s: string) => Buffer.from(`FX::${s}`, "utf8"),
-		decrypt: (b: Buffer) => {
+		async encrypt(s: string) {
+			return Buffer.from(`FX::${s}`, "utf8");
+		},
+		async decrypt(b: Buffer) {
 			const t = b.toString("utf8");
 			if (!t.startsWith("FX::")) throw new Error("not decryptable");
-			return t.slice(4);
+			return { plaintext: t.slice(4), reencrypt: false };
 		},
 	};
 	return codec;

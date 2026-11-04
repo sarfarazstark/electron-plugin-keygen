@@ -29,7 +29,7 @@ export type RegisterKeygenOptions = {
 	config?: KeygenConfigInput | null;
 	log?: Logger;
 	/** Injectable for tests; defaults to the safeStorage-backed factory. */
-	createService?: (args: InitArgs) => LicensingService | null;
+	createService?: (args: InitArgs) => Promise<LicensingService | null>;
 };
 
 /** Resolves to the service once the app is ready; null when licensing is off. */
@@ -49,7 +49,7 @@ export function registerKeygen(options: RegisterKeygenOptions): Promise<Licensin
 		const createService = options.createService ?? (await import("./init.ts")).createLicensingService;
 		const config = options.config === undefined ? configFromEnv() : options.config;
 		try {
-			service = createService({
+			service = await createService({
 				userDataDir: options.app.getPath("userData"),
 				appName: options.app.name,
 				appVersion: options.app.getVersion(),

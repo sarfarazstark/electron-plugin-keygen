@@ -77,12 +77,12 @@ afterEach(() => {
 	cleanup(env.dir);
 });
 
-test("starts unlicensed when nothing is on disk", () => {
-	env.service.init();
+test("starts unlicensed when nothing is on disk", async () => {
+	await env.service.init();
 	assert.equal(env.service.getLicense(), null);
 });
 
-test("no key file means machine.lic is not consulted (original short-circuit)", () => {
+test("no key file means machine.lic is not consulted (original short-circuit)", async () => {
 	env.storage.saveMachineFile(
 		buildMachineCert({
 			keys,
@@ -93,12 +93,12 @@ test("no key file means machine.lic is not consulted (original short-circuit)", 
 			fileExpiry: iso(env.clock.now() + 86_400_000),
 		}),
 	);
-	env.service.init();
+	await env.service.init();
 	assert.equal(env.service.getLicense(), null);
 });
 
-test("restores license from a valid machine file on startup", () => {
-	env.storage.writeLicenseKey(LICENSE_KEY);
+test("restores license from a valid machine file on startup", async () => {
+	await env.storage.writeLicenseKey(LICENSE_KEY);
 	env.storage.saveMachineFile(
 		buildMachineCert({
 			keys,
@@ -110,7 +110,7 @@ test("restores license from a valid machine file on startup", () => {
 			entitlementCodes: ["feat-pro"],
 		}),
 	);
-	env.service.init();
+	await env.service.init();
 	const l = env.service.getLicense();
 	assert.ok(l);
 	assert.equal(l.code, "VALID");
@@ -118,8 +118,8 @@ test("restores license from a valid machine file on startup", () => {
 	assert.deepEqual(l.entitlements, ["feat-pro"]);
 });
 
-test("expired machine file does not become valid again, and skips cache fallback", () => {
-	env.storage.writeLicenseKey(LICENSE_KEY);
+test("expired machine file does not become valid again, and skips cache fallback", async () => {
+	await env.storage.writeLicenseKey(LICENSE_KEY);
 	env.storage.saveMachineFile(
 		buildMachineCert({
 			keys,
@@ -133,49 +133,49 @@ test("expired machine file does not become valid again, and skips cache fallback
 	// even with a perfectly valid response cache present, the expired file wins
 	const licBody = validateResponseBody({ key: LICENSE_KEY, expiry: iso(env.clock.now() + 3600_000) });
 	const cache = buildCacheRecord({ keys, url: env.validateUrl(), body: licBody, dateMs: env.clock.now() });
-	env.storage.cacheResponse(LICENSE_KEY, cache);
+	await env.storage.cacheResponse(LICENSE_KEY, cache);
 
-	env.service.init();
+	await env.service.init();
 	assert.equal(env.service.getLicense(), null);
 });
 
-test("restores license from a fresh validation cache (no machine file)", () => {
-	env.storage.writeLicenseKey(LICENSE_KEY);
+test("restores license from a fresh validation cache (no machine file)", async () => {
+	await env.storage.writeLicenseKey(LICENSE_KEY);
 	const licBody = validateResponseBody({
 		key: LICENSE_KEY,
 		expiry: iso(env.clock.now() + 3600_000),
 		entitlements: ["a", "b"],
 	});
-	env.storage.cacheResponse(
+	await env.storage.cacheResponse(
 		LICENSE_KEY,
 		buildCacheRecord({ keys, url: env.validateUrl(), body: licBody, dateMs: env.clock.now() - 60_000 }),
 	);
-	env.service.init();
+	await env.service.init();
 	const l = env.service.getLicense();
 	assert.ok(l);
 	assert.equal(l.code, "VALID");
 	assert.deepEqual(l.entitlements, ["a", "b"]);
 });
 
-test("cache older than cache_lifetime yields no license and deletes stale entries", () => {
+test("cache older than cache_lifetime yields no license and deletes stale entries", async () => {
 	env = makeEnv({ cacheLifetime: 60 });
-	env.storage.writeLicenseKey(LICENSE_KEY);
+	await env.storage.writeLicenseKey(LICENSE_KEY);
 	const licBody = validateResponseBody({ key: LICENSE_KEY, expiry: iso(env.clock.now() + 3600_000) });
-	env.storage.cacheResponse(
+	await env.storage.cacheResponse(
 		LICENSE_KEY,
 		buildCacheRecord({ keys, url: env.validateUrl(), body: licBody, dateMs: env.clock.now() - 61 * 60_000 }),
 	);
-	env.service.init();
+	await env.service.init();
 	assert.equal(env.service.getLicense(), null);
 });
 
-test("cache tampering after the fact is caught (signature over re-hashed body)", () => {
-	env.storage.writeLicenseKey(LICENSE_KEY);
+test("cache tampering after the fact is caught (signature over re-hashed body)", async () => {
+	await env.storage.writeLicenseKey(LICENSE_KEY);
 	const licBody = validateResponseBody({ key: LICENSE_KEY, expiry: iso(env.clock.now() + 3600_000) });
 	const cache = buildCacheRecord({ keys, url: env.validateUrl(), body: licBody, dateMs: env.clock.now() });
-	env.storage.cacheResponse(LICENSE_KEY, cache);
+	await env.storage.cacheResponse(LICENSE_KEY, cache);
 	// attacker edits the on-disk cache to extend validity
-	const loaded = env.storage.loadResponseCache(LICENSE_KEY);
+	const loaded = await env.storage.loadResponseCache(LICENSE_KEY);
 	assert.ok(loaded);
 	fs.writeFileSync(
 		loaded.path,
@@ -184,12 +184,12 @@ test("cache tampering after the fact is caught (signature over re-hashed body)",
 			body: validateResponseBody({ key: LICENSE_KEY, expiry: iso(env.clock.now() + 999 * 86_400_000) }),
 		}),
 	);
-	env.service.init();
+	await env.service.init();
 	assert.equal(env.service.getLicense(), null);
 });
 
-test("undecryptable machine file (wrong machine) does not brick the cache path", () => {
-	env.storage.writeLicenseKey(LICENSE_KEY);
+test("undecryptable machine file (wrong machine) does not brick the cache path", async () => {
+	await env.storage.writeLicenseKey(LICENSE_KEY);
 	env.storage.saveMachineFile(
 		buildMachineCert({
 			keys,
@@ -201,11 +201,11 @@ test("undecryptable machine file (wrong machine) does not brick the cache path",
 		}),
 	);
 	const licBody = validateResponseBody({ key: LICENSE_KEY, expiry: iso(env.clock.now() + 3600_000) });
-	env.storage.cacheResponse(
+	await env.storage.cacheResponse(
 		LICENSE_KEY,
 		buildCacheRecord({ keys, url: env.validateUrl(), body: licBody, dateMs: env.clock.now() }),
 	);
-	env.service.init();
+	await env.service.init();
 	// decrypt fails -> fall through to response cache, like the original
 	assert.ok(env.service.getLicense());
 });
@@ -233,7 +233,7 @@ test("validateKey happy path caches response, key and state", async () => {
 
 	// side effects
 	assert.equal(fs.existsSync(env.storage.keyFilePath()), true);
-	const cached = env.storage.loadResponseCache(LICENSE_KEY);
+	const cached = await env.storage.loadResponseCache(LICENSE_KEY);
 	assert.ok(cached);
 	assert.equal(JSON.parse(cached.cache.body).meta.code, "VALID");
 	assert.ok(env.service.getLicense());
@@ -243,15 +243,31 @@ test("validateKey caches key but not response when cacheValidResponse=false", as
 	enqueueValid(env, { expiry: iso(env.clock.now() + 3600_000) });
 	await env.service.validateKey({ key: LICENSE_KEY, cacheValidResponse: false });
 	assert.equal(fs.existsSync(env.storage.keyFilePath()), true);
-	assert.equal(env.storage.loadResponseCache(LICENSE_KEY), null);
+	assert.equal(await env.storage.loadResponseCache(LICENSE_KEY), null);
 });
 
 test("validateKey does not cache an un-activated response (expiry null)", async () => {
 	enqueueValid(env, { expiry: null });
 	await env.service.validateKey({ key: LICENSE_KEY });
-	assert.equal(env.storage.loadResponseCache(LICENSE_KEY), null);
-	// the key IS still cached (original caches it unconditionally)
-	assert.equal(env.storage.readLicenseKey(), LICENSE_KEY);
+	assert.equal(await env.storage.loadResponseCache(LICENSE_KEY), null);
+	// valid, so the key is cached even though there is nothing to cache a response for
+	assert.equal(await env.storage.readLicenseKey(), LICENSE_KEY);
+});
+
+test("an invalid result is not persisted and does not clobber a cached key", async () => {
+	// The original cached every returned key, revoked and banned ones included.
+	await env.storage.writeLicenseKey(LICENSE_KEY);
+	enqueueValid(env, {
+		valid: false,
+		code: "BANNED",
+		detail: "banned",
+		expiry: iso(env.clock.now() + 3600_000),
+	});
+
+	const l = await env.service.validateKey({ key: "BANNED-KEY-4321" });
+	assert.equal(l.valid, false);
+	assert.equal(await env.storage.readLicenseKey(), LICENSE_KEY, "no new key written, previous one untouched");
+	assert.equal(await env.storage.loadResponseCache("BANNED-KEY-4321"), null);
 });
 
 test("validateKey sends requested entitlements", async () => {
@@ -331,12 +347,15 @@ test("activate without prior validation fails with NO_LICENSE", async () => {
 	await expectKeygenError(env.service.activate(), "NO_LICENSE");
 });
 
-test("storage unavailability surfaces explicitly after state update", async () => {
+test("an unusable vault skips persistence instead of failing a successful validation", async () => {
 	env = makeEnv({ codecAvailable: false });
 	enqueueValid(env, { expiry: iso(env.clock.now() + 3600_000) });
-	await expectKeygenError(env.service.validateKey({ key: LICENSE_KEY }), "STORAGE_UNAVAILABLE");
-	// original semantics: state was updated before the (failing) key cache
-	assert.ok(env.service.getLicense());
+	const license = await env.service.validateKey({ key: LICENSE_KEY });
+
+	assert.equal(license.valid, true);
+	assert.ok(env.service.getLicense(), "reported result and state agree");
+	assert.equal(env.service.persistsLicenses, false);
+	assert.equal(fs.existsSync(env.storage.keyFilePath()), false, "nothing unprotected reaches disk");
 });
 
 /* ============================== checkout ================================ */
@@ -446,17 +465,23 @@ test("ttlForever on a maintained EXPIRED license sends empty ttl", async () => {
 	assert.ok(env.storage.readMachineFile());
 });
 
-test("ttlForever=false on the same maintained license sends the negative ttl (original behavior)", async () => {
+test("a maintained license past its expiry omits ttl instead of sending a negative one", async () => {
 	await licensedWith(env, { code: "EXPIRED", valid: true, expiry: iso(env.clock.now() - 100_000) });
 	const params: Array<[string, string]> = [
 		["encrypt", "1"],
 		["include", "license.entitlements,license"],
-		["ttl", "-100"],
 	];
 	enqueueCheckoutOk(env, params);
 	await env.service.checkout(86_400, false);
 	const url = new URL(String(env.mf.calls[1]?.url));
-	assert.equal(url.searchParams.get("ttl"), "-100");
+	assert.equal(url.searchParams.has("ttl"), false, "the server default applies; no negative lifetime");
+});
+
+test("checkout refuses when the vault cannot persist the key the machine file needs", async () => {
+	env = makeEnv({ codecAvailable: false });
+	await licensedWith(env, { expiry: iso(env.clock.now() + 86_400_000) });
+	await expectKeygenError(env.service.checkout(3600, false), "STORAGE_UNAVAILABLE");
+	assert.equal(env.storage.readMachineFile(), null, "no unusable machine file is issued");
 });
 
 test("checkout with a bad response signature does not save the file", async () => {
@@ -486,7 +511,7 @@ test("validateCheckoutKey validates without response caching, then checks out", 
 	assert.equal(l.valid, true);
 	assert.equal(env.mf.calls.length, 2);
 	assert.equal(
-		env.storage.loadResponseCache(LICENSE_KEY),
+		await env.storage.loadResponseCache(LICENSE_KEY),
 		null,
 		"checkout flow must not write response cache",
 	);
@@ -519,8 +544,8 @@ test("resetLicense clears files + state but keeps the cached key", async () => {
 	env.service.resetLicense();
 	assert.equal(env.service.getLicense(), null);
 	assert.equal(env.storage.readMachineFile(), null);
-	assert.equal(env.storage.loadResponseCache(LICENSE_KEY), null);
-	assert.equal(env.storage.readLicenseKey(), LICENSE_KEY, "key file must survive resetLicense()");
+	assert.equal(await env.storage.loadResponseCache(LICENSE_KEY), null);
+	assert.equal(await env.storage.readLicenseKey(), LICENSE_KEY, "key file must survive resetLicense()");
 });
 
 test("resetLicenseKey removes only the cached key", async () => {
@@ -537,7 +562,7 @@ test("resetLicenseKey removes only the cached key", async () => {
 	env.storage.saveMachineFile(cert);
 
 	env.service.resetLicenseKey();
-	assert.equal(env.storage.readLicenseKey(), null);
+	assert.equal(await env.storage.readLicenseKey(), null);
 	assert.equal(env.storage.readMachineFile(), cert);
 	assert.ok(env.service.getLicense(), "in-memory license is untouched by resetLicenseKey");
 });
@@ -556,7 +581,7 @@ test("license persists across restarts via machine file", async () => {
 
 	// "restart": brand-new service over the same directory/clock
 	const restart = makeEnvReusing(env);
-	restart.service.init();
+	await restart.service.init();
 	const l = restart.service.getLicense();
 	assert.ok(l);
 	assert.equal(l.code, "VALID");
@@ -595,7 +620,7 @@ function makeEnvReusing(source: Env): Env {
 test("getLicenseKey returns the decrypted key; decrypt failure is explicit", async () => {
 	enqueueValid(env, { expiry: iso(env.clock.now() + 3600_000) });
 	await env.service.validateKey({ key: LICENSE_KEY });
-	assert.equal(env.service.getLicenseKey(), LICENSE_KEY);
+	assert.equal(await env.service.getLicenseKey(), LICENSE_KEY);
 
 	fs.writeFileSync(env.storage.keyFilePath(), Buffer.from("undecryptable"));
 	await expectKeygenError((async () => env.service.getLicenseKey())(), "STORAGE_DECRYPT_FAILED");
