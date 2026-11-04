@@ -6,3 +6,4 @@ dist/
 example/out/
 /tauri
 .qoder/
+.scratch-sandbox
