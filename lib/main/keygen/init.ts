@@ -6,6 +6,7 @@ import { KeygenClient } from "./client.ts";
 import { createMachine } from "./machine.ts";
 import type { SecretCodec } from "./storage.ts";
 import { KeygenStorage } from "./storage.ts";
+import { buildVaultCodec } from "./vault.ts";
 import { LicensingService, type Logger } from "./service.ts";
 
 /**
@@ -14,39 +15,9 @@ import { LicensingService, type Logger } from "./service.ts";
  * build/run time — nothing licensing-critical is hardcoded.
  */
 
-/** The async API only exists from Electron 45; older peers get the sync calls. */
-type AsyncSafeStorage = {
-	isAsyncEncryptionAvailable?: () => Promise<boolean>;
-	encryptStringAsync?: (plaintext: string) => Promise<Buffer>;
-	decryptStringAsync?: (blob: Buffer) => Promise<{ result: string; shouldReEncrypt?: boolean }>;
-};
-
+/** Bound to the process's real safeStorage; the binding rules live in vault.ts. */
 export function buildSafeStorageCodec(): SecretCodec {
-	const { isAsyncEncryptionAvailable, encryptStringAsync, decryptStringAsync } =
-		safeStorage as typeof safeStorage & AsyncSafeStorage;
-	const hasAsync =
-		typeof isAsyncEncryptionAvailable === "function" &&
-		typeof encryptStringAsync === "function" &&
-		typeof decryptStringAsync === "function";
-
-	return {
-		isAvailable: async () => {
-			// On Linux with no secret store, safeStorage encrypts under a hardcoded
-			// password and still reports itself available — that is plaintext with
-			// extra steps, so the vault counts as unavailable and nothing is written.
-			if (process.platform === "linux" && safeStorage.getSelectedStorageBackend() === "basic_text") {
-				return false;
-			}
-			return hasAsync ? await isAsyncEncryptionAvailable() : safeStorage.isEncryptionAvailable();
-		},
-		encrypt: async (plaintext) =>
-			hasAsync ? await encryptStringAsync(plaintext) : safeStorage.encryptString(plaintext),
-		decrypt: async (blob) => {
-			if (!hasAsync) return { plaintext: safeStorage.decryptString(blob), reencrypt: false };
-			const out = await decryptStringAsync(blob);
-			return { plaintext: out.result, reencrypt: out.shouldReEncrypt === true };
-		},
-	};
+	return buildVaultCodec(safeStorage);
 }
 
 export type InitArgs = {
