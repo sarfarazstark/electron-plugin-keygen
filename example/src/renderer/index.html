@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<meta
+			http-equiv="Content-Security-Policy"
+			content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'"
+		/>
+		<title>Keygen Licensing (Electron port)</title>
+		<link rel="stylesheet" href="./style.css" />
+	</head>
+	<body>
+		<main>
+			<h1>Keygen Licensing</h1>
+			<p class="sub">Electron port of tauri-plugin-keygen (v2 branch)</p>
+
+			<section class="card">
+				<h2>Current state</h2>
+				<pre id="license-state">loading…</pre>
+				<div class="row">
+					<button type="button" id="btn-refresh">Refresh</button>
+					<button type="button" id="btn-license-key">Show cached key (masked)</button>
+				</div>
+				<pre id="license-key" class="muted"></pre>
+			</section>
+
+			<section class="card">
+				<h2>Validate license key</h2>
+				<input id="key-input" type="password" placeholder="e.g. KNIF-MHFL-DWKM-GOZL-WRTH" autocomplete="off" />
+				<div class="row">
+					<button type="button" id="btn-validate">validateKey()</button>
+					<button type="button" id="btn-checkout" class="primary">validateCheckoutKey() (offline 24h)</button>
+				</div>
+			</section>
+
+			<section class="card">
+				<h2>Reset</h2>
+				<div class="row">
+					<button type="button" id="btn-reset-license" class="danger">resetLicense()</button>
+					<button type="button" id="btn-reset-key" class="danger">resetLicenseKey()</button>
+				</div>
+				<p class="muted small">
+					resetLicense() clears the offline machine license + validation cache (keeps the cached key).
+					resetLicenseKey() removes only the cached license key.
+				</p>
+			</section>
+
+			<section class="card">
+				<h2>Last result</h2>
+				<pre id="output" class="muted">—</pre>
+			</section>
+		</main>
+		<script type="module" src="./main.ts"></script>
+	</body>
+</html>

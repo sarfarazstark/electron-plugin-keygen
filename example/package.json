@@ -1,0 +1,23 @@
+{
+	"name": "electron-plugin-keygen-example",
+	"private": true,
+	"version": "0.0.0",
+	"type": "module",
+	"main": "out/main/index.js",
+	"scripts": {
+		"dev": "electron-vite dev",
+		"build": "electron-vite build",
+		"start": "electron-vite preview",
+		"typecheck": "tsc --noEmit -p tsconfig.json"
+	},
+	"dependencies": {
+		"electron-plugin-keygen": "file:.."
+	},
+	"devDependencies": {
+		"@types/node": "^26.6.6",
+		"electron": "^45.2.2",
+		"electron-vite": "^6.0.0",
+		"typescript": "^7.0.2",
+		"vite": "^8.3.5"
+	}
+}
