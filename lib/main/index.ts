@@ -14,7 +14,7 @@
 
 export { KeygenBuilder } from "./keygen/builder.ts";
 export { registerKeygen, type KeygenAppHost, type RegisterKeygenOptions } from "./keygen/plugin.ts";
-export { keygenPreloadPath } from "./preload-path.ts";
+export { keygenPreloadPath, keygenSandboxedPreloadPath } from "./preload-path.ts";
 export { LicensingService, type Logger } from "./keygen/service.ts";
 export { buildSafeStorageCodec, createLicensingService, type InitArgs } from "./keygen/init.ts";
 export { makeWindowTrustChecker, registerKeygenIpc, type IpcMainLike } from "./keygen/ipc.ts";

@@ -19,6 +19,10 @@
 			"types": "./dist/preload/api.d.ts",
 			"import": "./dist/preload/api.js"
 		},
+		"./preload/sandboxed": {
+			"types": "./dist/preload/sandboxed.d.cts",
+			"default": "./dist/preload/sandboxed.cjs"
+		},
 		"./renderer": {
 			"types": "./dist/renderer/index.d.ts",
 			"import": "./dist/renderer/index.js"
