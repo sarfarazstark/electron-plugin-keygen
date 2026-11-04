@@ -55,6 +55,63 @@ continues unlicensed; a re-validation is required. The reason is now readable in
 `service.startupDiagnostic` (sanitized message, no key material, deliberately not an IPC channel).
 Wire a logger that reaches your diagnostics.
 
+### The validation cache is only valid for the local calendar day — medium
+
+`responseCachePath()` names each entry `sha256("{key}:{YYYY-MM-DD}")`, and `load()` reads today's name
+(`lib/main/keygen/storage.ts:118`, `lib/main/keygen/service.ts:99`). So an offline restart on a *new*
+day finds nothing, whatever `cacheLifetime` says — the maximum 1440 minutes is unreachable through this
+path. This is upstream's design, not a regression: the durable offline artefact is the checked-out
+machine file, and the response cache is only "the app was validated earlier today".
+
+Consequence for a host: if you want offline use that survives a restart, call
+`validateCheckoutKey()`, not `validateKey()`. A user who flies overnight and opens the app on the other
+side revalidates or stays unlicensed.
+
+### Seats are never released — medium
+
+`validateKey` auto-activates on `NO_MACHINE` / `NO_MACHINES` / `FINGERPRINT_SCOPE_MISMATCH`
+(`lib/main/keygen/service.ts:157`), and there is no machine deletion anywhere in this package — nothing
+calls `DELETE /v1/machines/{id}`, so `resetLicense()` forgets the local file and leaves the seat taken.
+Any change to the fingerprint (OS reinstall, a reimaged VM, a cloned `/etc/machine-id` fixed up later)
+creates a *new* machine, and the old one accumulates.
+
+At `maxMachinesByLicense` the user is locked out of a key they own, with an error that reads as
+"license invalid". Releasing a seat needs an account-level token, which must not ship inside the app, so
+the only correct fix is operational: leave headroom in the policy, and give support a dashboard step.
+`FINGERPRINT_SCOPE_MISMATCH` is the code to watch for — it means the same machine reported a different
+fingerprint, i.e. a seat just leaked.
+
+### The renderer can read the raw license key — medium
+
+`getLicenseKey()` returns the decrypted key over IPC (`lib/main/keygen/ipc.ts:47`), because the
+plugin's own UI is expected to display it, and `validateKey` echoes it in the license object too. It is
+never placed in renderer storage by this package, but anything that executes JS in that window can read
+it and use it elsewhere — combined with the machine-file note above, a stolen key plus a target
+fingerprint (trivially readable on a machine the attacker controls) is a working copy.
+
+Only surface this channel to windows that need it, keep remote content out of licensed windows, and if
+your UI can show a masked key, mask it.
+
+### Licensing fails open when the build is unconfigured — medium
+
+With no verify key, every channel throws `LICENSING_DISABLED` (`lib/main/keygen/ipc.ts:75`) and the app
+is expected to keep running — that is what the example does, and what the README documents as a
+supported state. Right for development, wrong by default for a release: an env var that failed to bake
+into the packaged app ships a build with no licensing signal at all, and whether that means "features
+off" or "features free" is decided by your own gate, not here.
+
+In a release build, assert that licensing is configured at startup and refuse to run paid features if it
+is not.
+
+### Old response-cache entries are swept only on a cache hit — low
+
+`clearResponseCacheExcept()` runs inside the branch where *today's* entry was found
+(`lib/main/keygen/service.ts:102`), mirroring upstream's call site. If the machine file satisfies the
+start, or if today's entry is missing, entries from previous days stay on disk indefinitely. They are
+encrypted and they fail verification once past `cacheLifetime`, so this is clutter rather than a leak —
+but it means README's "entries from other days are deleted at startup" is only true on a start that hits
+the cache. `resetLicense()` does clear the whole directory.
+
 ## Fixed since the security review
 
 | Was | Now |

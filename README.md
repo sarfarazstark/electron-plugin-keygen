@@ -102,8 +102,9 @@ rather than Electron's raw "No handler registered" error, so `isKeygenError(err)
 `{userData}/keygen/`
 
 - `machine.lic` — Keygen machine file (AES-256-GCM envelope, Ed25519 signature), format unchanged
-- `validation_cache/{sha256("key:YYYY-MM-DD")}` — signed response, encrypted with `safeStorage`,
-  reused offline; entries from other days are deleted at startup
+- `validation_cache/{sha256("key:YYYY-MM-DD")}` — signed response, encrypted with `safeStorage`, reused
+  offline **for the remainder of that local day** — the filename is the day, so an offline restart after
+  midnight does not find it. `validateCheckoutKey()` is the call that survives a restart.
 - `key` — license key encrypted with Electron `safeStorage` (DPAPI / Keychain / libsecret)
 
 Both encrypted files are secrets: the cached response body contains the license key, so it is
