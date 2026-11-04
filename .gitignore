@@ -7,3 +7,5 @@ example/out/
 /tauri
 .qoder/
 .scratch-sandbox
+
+.env.local
